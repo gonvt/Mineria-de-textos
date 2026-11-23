@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+# fichero que genera el cuaderno al ejecutarse
+notebooks/dataset.csv
+dataset.csv
+!data/dataset.csv
