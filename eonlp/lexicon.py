@@ -65,6 +65,9 @@ PARTICLES = {"ajn", "ĉi", "ja", "jen", "mem", "nur", "eĉ"}
 
 INTERJECTIONS = {"ho", "ha", "ve", "nu", "fi", "hura", "aĥ", "ehe", "hej", "bis", "saluton", "dankon"}
 
+# Abreviaturas frecuentes: ktp (kaj tiel plu = etc.), ekz (ekzemple), ks (kaj simile)...
+ABBREVIATIONS = {"ktp", "ekz", "ks", "kp", "vd", "ĉ", "pp", "ktr", "resp", "bv", "sk"}
+
 # Numerales cardinales básicos
 NUMERAL_UNITS = ["unu", "du", "tri", "kvar", "kvin", "ses", "sep", "ok", "naŭ"]
 NUMERAL_WORDS = set(NUMERAL_UNITS) | {"nul", "dek", "cent", "mil"}
@@ -129,6 +132,8 @@ def closed_class_lexicon():
         lex[w] = ("INTJ", w, {})
     for w in PRIMARY_ADVERBS:
         lex[w] = ("ADV", w, {})
+    for w in ABBREVIATIONS:
+        lex[w] = ("X", w, {"Abbr": "Yes"})
     for w in CONJUNCTIONS:
         upos = "SCONJ" if w in {"ke", "se", "ĉar", "kvankam", "ĉu", "kvazaŭ", "dum", "ol"} else "CCONJ"
         lex[w] = (upos, w, {})
