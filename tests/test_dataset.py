@@ -1,8 +1,10 @@
 """Tests de la Fase 1 (limpieza, segmentación y contrato de datos)."""
 
+import re
+
 import pandas as pd
 
-from eonlp.dataset import (EXCLUDED_SUBCATEGORIES, build_dataset, clean_paragraph,
+from eonlp.dataset import (EXCLUDED_SUBCATEGORIES, TOPICS, build_dataset, clean_paragraph,
                            load_dataset, save_dataset, split_paragraphs)
 
 ARTICLE = """Fiziko estas la natura scienco kiu studas la materion, la energion, la spacon kaj la tempon kaj iliajn interagojn en la universo.
@@ -30,15 +32,29 @@ def test_clean_paragraph():
     assert clean_paragraph("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20") is None
 
 
-def test_build_dataset_contract(tmp_path):
+TENNIS = ("La teniso estas rakeda sporto kiun ludas du aŭ kvar ludantoj sur tenisejo, "
+          "kaj la celo estas trafi la pilkon trans la reton.")
+OLYMPICS = ("La Somera Olimpiko okazis en la urbo kun multaj sportoj kaj miloj da sportistoj "
+            "el pli ol cent landoj de la mondo.\n"
+            "En la rugbea turniro la teamo de Fiĝioj gajnis la oran medalon post bona finalo "
+            "kontraŭ la teamo de Britio.\n"
+            "La tenisa kaj rugbea turniroj okazis en la sama semajno en du malsamaj stadionoj "
+            "de la olimpika parko.")
+
+
+def test_build_dataset_rules(tmp_path):
     raw = {
-        "fiziko": [{"title": "Fiziko", "text": ARTICLE}, {"title": "Komuna", "text": ARTICLE}],
-        "kemio": [{"title": "Komuna", "text": ARTICLE + "\nKemio estas la scienco pri la substancoj, "
-                   "iliaj ecoj kaj la reakcioj per kiuj ili transformiĝas en aliajn substancojn."}],
+        "teniso": [{"title": "Teniso", "source": "kategorio", "text": TENNIS + "\n" + ARTICLE}],
+        "rugbeo": [{"title": "Olimpiko", "source": "sercho", "text": OLYMPICS},
+                   {"title": "Golfejo", "source": "kategorio", "text": TENNIS}],
     }
-    df = build_dataset(raw)
-    assert "Komuna" not in set(df["title"])        # artículo en dos clases -> descartado
-    assert set(df["class"]) == {"fiziko"}
+    df = build_dataset(raw, exclude_titles={"Golfejo"})
+    # categoría: se guardan todos los párrafos (también el genérico de ARTICLE)
+    assert (df["title"] == "Teniso").sum() == 3
+    # buscador: solo el párrafo que menciona el rugby y ningún otro deporte
+    olimp = df[df["title"] == "Olimpiko"]
+    assert len(olimp) == 1 and "Fiĝioj" in olimp["text"].iloc[0]
+    assert "Golfejo" not in set(df["title"])             # página reservada
     path = tmp_path / "d.csv"
     save_dataset(df, path)
     assert path.read_text(encoding="utf-8").splitlines()[0] == "text;class"
@@ -47,15 +63,21 @@ def test_build_dataset_contract(tmp_path):
     assert len(back) == len(df)
 
 
+def test_golf_keywords_ignore_geographic_gulf():
+    rx = re.compile(TOPICS["golfo"]["keywords"], re.IGNORECASE)
+    assert rx.search("Li estas fama usona golfludisto.")
+    assert rx.search("La golfejo havas dek ok truojn.")
+    assert not rx.search("La ŝipo eniris la Golfon de Meksiko.")
+
+
 def test_excluded_subcategories():
-    assert EXCLUDED_SUBCATEGORIES.search("Kategorio:Fizikistoj")
-    assert EXCLUDED_SUBCATEGORIES.search("Kategorio:Biokemio")
-    assert not EXCLUDED_SUBCATEGORIES.search("Kategorio:Kemiaj elementoj")
+    assert EXCLUDED_SUBCATEGORIES.search("Kategorio:Usona piedpilko")
+    assert not EXCLUDED_SUBCATEGORIES.search("Kategorio:Tenisistoj")
 
 
 def test_published_dataset_meets_contract():
     df = pd.read_csv("data/dataset.csv", sep=";", encoding="utf-8")
     assert list(df.columns) == ["text", "class"]
     assert not df["text"].str.contains(";").any()
-    assert (df["class"].value_counts() >= 300).all()
-    assert df["class"].nunique() >= 3
+    assert set(df["class"]) == set(TOPICS)
+    assert not df["text"].duplicated().any()

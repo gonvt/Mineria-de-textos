@@ -72,9 +72,12 @@ def make_vectorizer(ngram_range=(1, 1), min_df=2, max_df=0.9):
 def candidate_models():
     """Clasificadores ligeros (entrenan en segundos sin GPU)."""
     return {
-        "Naive Bayes": MultinomialNB(alpha=0.1),
-        "Regresión logística": LogisticRegression(C=10, max_iter=2000, random_state=SEED),
-        "SVM lineal": LinearSVC(C=1.0, random_state=SEED),
+        # El dataset está desbalanceado (mucho más tenis): NB con probabilidades
+        # a priori uniformes y los modelos lineales con pesos 'balanced'.
+        "Naive Bayes": MultinomialNB(alpha=0.1, fit_prior=False),
+        "Regresión logística": LogisticRegression(C=10, max_iter=2000, class_weight="balanced",
+                                                  random_state=SEED),
+        "SVM lineal": LinearSVC(C=1.0, class_weight="balanced", random_state=SEED),
     }
 
 

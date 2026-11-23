@@ -55,17 +55,25 @@ md(f"""
 [![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/{REPO}/blob/main/notebooks/clasificacion_esperanto.ipynb)
 
 En este cuaderno se construye, de principio a fin, un sistema que clasifica
-textos en **Esperanto** según su temática científica:
+textos en **Esperanto** según el **deporte** del que hablan:
 
-| Clase | Categoría de Vikipedio | Qué contiene |
+| Clase | Categoría de Vikipedio | Deporte |
 |---|---|---|
-| `fiziko` | [Kategorio:Fiziko](https://eo.wikipedia.org/wiki/Kategorio:Fiziko) | física: mecánica, óptica, electromagnetismo... |
-| `kemio` | [Kategorio:Kemio](https://eo.wikipedia.org/wiki/Kategorio:Kemio) | química: elementos, reacciones, compuestos... |
-| `biologio` | [Kategorio:Biologio](https://eo.wikipedia.org/wiki/Kategorio:Biologio) | biología: células, ecología, genética... |
+| `teniso` | [Kategorio:Teniso](https://eo.wikipedia.org/wiki/Kategorio:Teniso) | tenis |
+| `golfo` | [Kategorio:Golfo (sporto)](https://eo.wikipedia.org/wiki/Kategorio:Golfo_(sporto)) | golf |
+| `rugbeo` | [Kategorio:Rugbeo](https://eo.wikipedia.org/wiki/Kategorio:Rugbeo) | rugby |
 
-Las tres son ramas de las ciencias naturales, **semánticamente cercanas**
-(comparten vocabulario: *energio, molekulo, ĉelo, atomo, reakcio*...), así que
-el problema no es trivial.
+Los tres son deportes, **semánticamente cercanos**: comparten vocabulario
+(*ludanto, pilko, turniro, ĉampiono, teamo, poento, matĉo, olimpiko*...), así
+que el problema no es trivial.
+
+> **Nota sobre el pádel.** La temática elegida inicialmente era *pádel, golf y
+> rugby*, pero la Vikipedio en Esperanto solo tiene **un artículo de pádel de
+> cuatro frases** ([Padelo (sporto)](https://eo.wikipedia.org/wiki/Padelo_(sporto))),
+> y no se encontró otra fuente en Esperanto. Con ~5 párrafos no se puede
+> entrenar una clase (el enunciado recomienda más de 300), así que se sustituyó
+> por el **tenis**, el deporte más parecido. El artículo de pádel se usa al
+> final como prueba: ¿a qué deporte se parece según el modelo?
 
 **Índice**
 
@@ -103,8 +111,9 @@ de las dos fuentes**.
 code(f"""
 # ---------------------------- PARÁMETROS ----------------------------------
 GENERAR_DATASET = False        # True = volver a descargar todo desde Vikipedio
-MAX_ARTICULOS_POR_CLASE = 300  # artículos por categoría (solo si se genera)
-PROFUNDIDAD_SUBCATEGORIAS = 2  # niveles de subcategorías a recorrer
+MAX_ARTICULOS_POR_CLASE = 400  # artículos de la categoría (solo si se genera)
+PROFUNDIDAD_SUBCATEGORIAS = 3  # niveles de subcategorías a recorrer
+MAX_BUSQUEDA = 500             # artículos por búsqueda en el buscador de Vikipedio
 SEED = 42                      # semilla para que los resultados sean reproducibles
 
 URL_DATASET = "{RAW}/data/dataset_con_titulos.csv"   # text;class;title
@@ -134,7 +143,7 @@ np.random.seed(SEED)
 
 pd.set_option("display.max_colwidth", 120)
 plt.rcParams.update({"figure.dpi": 110, "axes.spines.top": False, "axes.spines.right": False})
-COLORES = {"fiziko": "#2a78b5", "kemio": "#d9822b", "biologio": "#3a9a5b"}
+COLORES = {"teniso": "#d9822b", "golfo": "#3a9a5b", "rugbeo": "#2a78b5"}
 
 print("Python      ", sys.version.split()[0])
 for lib in (pd, np, sklearn, matplotlib, requests):
@@ -151,19 +160,31 @@ md("""
 
 Se usa el **API de MediaWiki de Vikipedio** (`eo.wikipedia.org/w/api.php`):
 
-1. `list=categorymembers` para recorrer cada categoría **en anchura (BFS)** y sus
-   subcategorías hasta 2 niveles, hasta reunir 300 artículos por clase.
-2. `prop=extracts&explaintext=1` para obtener el **texto plano** de cada artículo
+1. `list=categorymembers` para recorrer la categoría de cada deporte **en
+   anchura (BFS)** y sus subcategorías (jugadores, torneos, equipos...) hasta 3
+   niveles.
+2. `list=search` (buscador): las categorías deportivas de Vikipedio son
+   **pequeñas** (golf y rugby tienen menos de 20 artículos), así que se añaden
+   los artículos que **mencionan** el deporte: biografías, Juegos Olímpicos,
+   estadios, ciudades...
+3. `prop=extracts&explaintext=1` para obtener el **texto plano** de cada artículo
    (sin HTML, plantillas ni enlaces).
 
 **Decisiones de diseño**
 
-* **Subcategorías excluidas**: biografías (*Fizikistoj, Kemiistoj, Biologoj*),
-  listas, organizaciones, premios, esbozos (*Ĝermoj*) y, sobre todo, las
-  **interdisciplinares** (*Biofiziko, Biokemio, Kvantuma kemio*), que
-  pertenecerían a dos clases a la vez. También *Metalurgio* / *Kemia industrio*,
-  que se alejan hacia la industria y la historia.
-* Un artículo que aparece en **más de una clase** se descarta (etiqueta ambigua).
+* **Dos fuentes, dos reglas**: de los artículos de la **categoría** se guardan
+  todos los párrafos (heredan la etiqueta). De los encontrados con el
+  **buscador** solo se guardan los párrafos que contienen una **palabra clave**
+  del deporte (`tenis…`, `rugbe…`, `golfludo/golfejo/golfisto…`): un artículo
+  sobre una ciudad no es de rugby, pero su párrafo sobre el equipo de rugby sí.
+* **"Golfo" es ambiguo** en Esperanto: también es un golfo geográfico (*Golfo de
+  Meksiko*). Por eso las palabras clave de golf son solo derivados inequívocos.
+* **Subcategorías excluidas**: el fútbol americano y canadiense (*Usona
+  piedpilko, NFL*) cuelgan de *Rugbeo* en Vikipedio, pero son otro deporte;
+  también videojuegos, esbozos y plantillas.
+* Un párrafo que menciona **dos de los deportes** (p. ej. un resumen de unos
+  Juegos Olímpicos) se descarta por ambiguo.
+* Las páginas reservadas para la prueba web (`HOLDOUT_TITLES`) se excluyen.
 * Cada artículo se divide en **párrafos**; se ignoran los títulos de sección y
   todo lo que va después de *Vidu ankaŭ, Referencoj, Notoj, Eksteraj ligiloj*...
 * Limpieza: URLs, referencias `[1]`, fórmulas LaTeX, el carácter `;`
@@ -185,9 +206,9 @@ separa train/test **por artículo** para no "hacer trampa".
 """)
 code("""
 def generar_dataset():
-    print("Descargando artículos de Vikipedio... (puede tardar ~10-15 min)")
+    print("Descargando artículos de Vikipedio... (puede tardar ~15 min)")
     t0 = time.time()
-    raw = download_articles(CATEGORIES, MAX_ARTICULOS_POR_CLASE, PROFUNDIDAD_SUBCATEGORIAS)
+    raw = download_articles(TOPICS, MAX_ARTICULOS_POR_CLASE, PROFUNDIDAD_SUBCATEGORIAS, MAX_BUSQUEDA)
     df = build_dataset(raw)
     print(f"Dataset generado en {time.time() - t0:.0f} s")
     return df
@@ -229,11 +250,15 @@ comprobaciones = {
     "sin URLs": not contrato["text"].str.contains(r"https?://|www\\.").any(),
     "sin referencias [n]": not contrato["text"].str.contains(r"\\[\\d+\\]").any(),
     "sin valores vacíos": not contrato.isna().any().any(),
-    ">= 300 párrafos por clase": (contrato["class"].value_counts() >= 300).all(),
+    "sin párrafos duplicados": not contrato["text"].duplicated().any(),
 }
 for regla, ok in comprobaciones.items():
     print(("✅" if ok else "❌"), regla)
 assert all(comprobaciones.values())
+
+# Recomendación del enunciado (no obligatoria): más de 300 párrafos por clase
+for clase, n in contrato["class"].value_counts().items():
+    print(("✅" if n >= 300 else "⚠️ "), f"{clase}: {n} párrafos", "" if n >= 300 else "(menos de los 300 recomendados)")
 """)
 
 md("### 1.4 Exploración del dataset")
@@ -242,13 +267,13 @@ resumen = df.groupby("class").agg(
     parrafos=("text", "size"),
     articulos=("title", "nunique"),
     palabras_media=("text", lambda s: s.str.split().str.len().mean()),
-).round(1).loc[list(CATEGORIES)]
+).round(1).loc[list(TOPICS)]
 display(resumen)
 
 fig, axes = plt.subplots(1, 3, figsize=(14, 3.6))
 resumen["parrafos"].plot.bar(ax=axes[0], color=[COLORES[c] for c in resumen.index], rot=0)
 axes[0].set_title("Párrafos por clase")
-for c in CATEGORIES:
+for c in TOPICS:
     df.loc[df["class"] == c, "text"].str.split().str.len().clip(upper=200).plot.hist(
         ax=axes[1], bins=40, alpha=0.55, color=COLORES[c], label=c)
 axes[1].set_title("Longitud de los párrafos (palabras)"); axes[1].legend()
@@ -257,14 +282,21 @@ axes[2].set_title("Párrafos por artículo")
 plt.tight_layout(); plt.show()
 """)
 md("""
-El dataset está algo **desbalanceado** (física tiene más párrafos porque sus
-artículos son más largos). No se re-muestrea: se usará **F1 macro** como métrica
-principal, que pesa igual las tres clases. También hay artículos muy largos
-(más de 100 párrafos) que pesan mucho en su clase; por eso la partición
-train/test se hace por artículo.
+**Limitación de los datos.** El dataset está **desbalanceado**: hay unas
+cuatro veces más tenis que golf. La Vikipedio en Esperanto tiene mucho más
+contenido de tenis (cientos de biografías de tenistas) que de golf o rugby, y
+el golf **no llega a los 300 párrafos recomendados**: se recogieron todos los
+párrafos de golf que hay (la categoría tiene 17 artículos y el buscador apenas
+añade un centenar más). Por eso se bajó el mínimo de palabras por párrafo a 10.
+
+Cómo se compensa: no se re-muestrea (se perderían datos de tenis), sino que
+**F1 macro** es la métrica principal (pesa igual las tres clases), Naive Bayes
+usa probabilidades *a priori* uniformes (`fit_prior=False`) y los modelos
+lineales usan `class_weight="balanced"`. La partición train/test se hace por
+artículo.
 """)
 code("""
-for c in CATEGORIES:
+for c in TOPICS:
     ejemplo = df[df["class"] == c].sample(1, random_state=SEED).iloc[0]
     print(f"[{c}] ({ejemplo['title']})\\n  {ejemplo['text'][:300]}\\n")
 """)
@@ -272,34 +304,35 @@ for c in CATEGORIES:
 md("""
 ### 1.5 Ruido de etiquetado (primera aproximación)
 
-Cada párrafo **hereda la etiqueta de su artículo**, pero muchos párrafos son
-genéricos: fechas, historia, biografías... (*"Ĝi estis fondita en 1950"*).
-Una medida sencilla del ruido: buscar párrafos que **no contienen ningún término
-del dominio**. Se define el vocabulario de dominio con raíces típicas de cada
-ciencia (lista propia, sin usar el modelo, para no tener un razonamiento circular).
+Los párrafos de los artículos de la categoría **heredan la etiqueta**, pero
+muchos son genéricos: fechas, vida privada de un jugador, historia de un club...
+(*"Ĝi estis fondita en 1950"*). Una medida sencilla del ruido: buscar párrafos
+que **no contienen ningún término deportivo** de su deporte. Se define una lista
+propia de raíces de cada deporte (sin usar el modelo, para no tener un
+razonamiento circular). Los párrafos del buscador cumplen esto por construcción
+(contienen la palabra clave), así que se mide solo sobre los de la categoría.
 En la Fase 3 se mide el ruido de una segunda forma, con el propio clasificador.
 """)
 code("""
 RAICES_DOMINIO = {
-    "fiziko": ["fizik", "energi", "fort", "mas", "rapid", "ond", "lum", "elektr", "magnet",
-               "kvantum", "partikl", "gravit", "temperatur", "radiad", "mekanik", "optik",
-               "frekvenc", "akcel", "kamp", "relativ"],
-    "kemio": ["kemi", "ĥemi", "atom", "molekul", "element", "reakci", "acid", "baz", "jon",
-              "metal", "oksid", "kombinaĵ", "solv", "hidrogen", "oksigen", "karbon", "salo",
-              "izotop", "kristal", "gas"],
-    "biologio": ["biolog", "ĉel", "organism", "speci", "gen", "protein", "plant", "best",
-                 "evoluci", "evolu", "histo", "ekolog", "bakteri", "vivaĵ", "hormon",
-                 "kromosom", "dna", "sang", "nutr", "reprodukt"],
+    "teniso": ["tenis", "raked", "servo", "seto", "ATP", "WTA", "Grand Slam", "Wimbledon",
+               "Roland", "Davis", "duobl", "unuopa", "turnir", "ludant", "matĉ"],
+    "golfo": ["golf", "truo", "bastono", "PGA", "Masters", "Ryder", "ludant",
+              "turnir", "ĉampion", "klub"],
+    "rugbeo": ["rugbe", "ludant", "teamo", "matĉ", "provo", "pokal", "ŝlem", "ligo",
+               "klub", "ĉampion", "Ses Nacioj", "turnir"],
 }
-todas = [r for rs in RAICES_DOMINIO.values() for r in rs]
-patron = re.compile(r"\\b(" + "|".join(todas) + r")", re.IGNORECASE)
-df["sin_termino_de_dominio"] = ~df["text"].str.contains(patron)
+patrones = {c: re.compile("|".join(map(re.escape, rs)), re.IGNORECASE) for c, rs in RAICES_DOMINIO.items()}
+df["sin_termino_de_dominio"] = [not patrones[c].search(t) for t, c in zip(df["text"], df["class"])]
 
-ruido_heuristico = df.groupby("class")["sin_termino_de_dominio"].mean().mul(100).round(1)
-print("% de párrafos sin ningún término científico:")
-print(ruido_heuristico.to_string(), f"\\nTotal: {df['sin_termino_de_dominio'].mean()*100:.1f} %")
+de_categoria = df[df["source"] == "kategorio"]
+ruido_heuristico = de_categoria.groupby("class")["sin_termino_de_dominio"].mean().mul(100).round(1)
+print("Párrafos de la categoría SIN ningún término de su deporte (%):")
+print(ruido_heuristico.reindex(list(TOPICS)).to_string(),
+      f"\\nTotal: {de_categoria['sin_termino_de_dominio'].mean()*100:.1f} % "
+      f"({de_categoria['sin_termino_de_dominio'].sum()} párrafos)")
 print("\\nEjemplos:")
-for t in df[df["sin_termino_de_dominio"]].sample(4, random_state=SEED)["text"]:
+for t in de_categoria[de_categoria["sin_termino_de_dominio"]].sample(4, random_state=SEED)["text"]:
     print(" ·", t[:160])
 """)
 
@@ -324,8 +357,8 @@ con la terminación, sin excepciones:
 
 | Terminación | Categoría | Rasgos | Ejemplo → lema |
 |---|---|---|---|
-| `-o` (`-oj`, `-on`, `-ojn`) | sustantivo `NOUN` | número, caso | *atomojn* → *atomo* |
-| `-a` (`-aj`, `-an`, `-ajn`) | adjetivo `ADJ` | número, caso | *kemiajn* → *kemia* |
+| `-o` (`-oj`, `-on`, `-ojn`) | sustantivo `NOUN` | número, caso | *pilkojn* → *pilko* |
+| `-a` (`-aj`, `-an`, `-ajn`) | adjetivo `ADJ` | número, caso | *tenisajn* → *tenisa* |
 | `-e` (`-en`) | adverbio `ADV` | dirección | *rapide* → *rapide* |
 | `-as` / `-is` / `-os` | verbo `VERB` | presente / pasado / futuro | *trovis* → *trovi* |
 | `-us` / `-u` / `-i` | verbo `VERB` | condicional / imperativo / infinitivo | *estu* → *esti* |
@@ -442,8 +475,8 @@ aplica **TF-IDF** (`sublinear_tf`, `min_df=2`, `max_df=0.9`).
 Se comparan tres representaciones para justificar el uso del modelo de NLP:
 
 * `text`: palabra en minúsculas, **sin lematizar** (línea base);
-* `lemma`: **lema** (`atomojn`, `atomo` → `atomo`);
-* `root`: **raíz** sin terminación (`fiziko`, `fizika`, `fizike` → `fizik`).
+* `lemma`: **lema** (`pilkojn`, `pilko` → `pilko`);
+* `root`: **raíz** sin terminación (`tenisa`, `teniso` → `tenis`).
 """)
 code(module_source("classify"))
 code("""
@@ -507,8 +540,8 @@ md("""
 #### Ajuste de hiperparámetros
 
 Sobre la mejor representación se ajusta el hiperparámetro principal del mejor
-modelo y se prueba si añadir **bigramas** ayuda (p. ej. *nigra truo*, *kemia
-reakcio*).
+modelo y se prueba si añadir **bigramas** ayuda (p. ej. *granda ŝlemo*,
+*nacia teamo*).
 """)
 code("""
 from sklearn.model_selection import GridSearchCV
@@ -569,7 +602,7 @@ print(f"F1 macro : {f1_score(y_test, y_pred, average='macro'):.3f}\\n")
 print(classification_report(y_test, y_pred, digits=3))
 """)
 code("""
-clases = list(CATEGORIES)
+clases = list(TOPICS)
 fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
 ConfusionMatrixDisplay(confusion_matrix(y_test, y_pred, labels=clases), display_labels=clases).plot(
     ax=axes[0], cmap="Blues", colorbar=False)
@@ -631,11 +664,10 @@ lista de raíces es corta: marca como "genérico" cualquier párrafo que use otr
 vocabulario. El clasificador es más fino. Al revisar sus ejemplos se ven dos
 tipos de "errores":
 
-1. **Ruido real del etiquetado**: párrafos de historia, fechas o biografía que
-   no hablan de la ciencia del artículo.
-2. **Solapamiento real entre clases**: un párrafo de un artículo de química que
-   habla de energía o de luz es, de verdad, de física. Aquí el "error" del
-   modelo es razonable.
+1. **Ruido real del etiquetado**: párrafos de biografía, política o historia
+   de un club que no hablan del deporte.
+2. **Vocabulario compartido**: párrafos sobre torneos, olimpiadas, ciudades o
+   países que podrían ser de cualquiera de los tres deportes.
 
 ¿Eliminar estos párrafos? Se ha decidido **no** hacerlo en el conjunto de test
 (sería evaluar el modelo con datos elegidos por el propio modelo), pero sí se
@@ -651,7 +683,24 @@ print(f"F1 macro en test, entrenando sin párrafos ruidosos: "
 """)
 
 md("""
-### 3.6 Modelo final con todos los datos
+### 3.6 ¿El modelo solo mira el nombre del deporte?
+
+Los párrafos del buscador se eligieron precisamente porque contienen la palabra
+del deporte (*tenis-, golf-, rugbe-*). Un modelo podría aprobar solo con eso.
+Para comprobarlo, se **eliminan de los textos todas las palabras que empiezan
+por esas raíces** y se repite la validación cruzada.
+""")
+code("""
+sin_nombre = re.compile(r"\\b(tenis|golf|rugbe)\\S*", re.IGNORECASE)
+X_sin_nombre = [re.sub(r"\\s+", " ", sin_nombre.sub(" ", t)).strip() for t in X_txt]
+f1_sin_nombre = cross_validate(clone(busqueda.best_estimator_), X_sin_nombre, y, groups=grupos,
+                               cv=cv_grupos, scoring="f1_macro", n_jobs=-1)["test_score"].mean()
+print(f"F1 macro CV con todas las palabras           : {busqueda.best_score_:.3f}")
+print(f"F1 macro CV sin las palabras tenis/golf/rugbe: {f1_sin_nombre:.3f}")
+""")
+
+md("""
+### 3.7 Modelo final con todos los datos
 
 Para clasificar páginas web se reentrena el modelo con **todo** el dataset
 (la evaluación ya se ha hecho con la partición de test).
@@ -665,9 +714,9 @@ def clasificar_texto(texto):
     return {str(c): round(float(p), 3) for c, p in zip(modelo_final.classes_, proba)}
 
 
-for frase in ["La elektrono havas negativan elektran ŝargon kaj tre malgrandan mason.",
-              "Natrio reakcias kun kloro kaj formas natrian kloridon, t.e. kuirsalon.",
-              "La fotosintezo okazas en la kloroplastoj de la plantaj ĉeloj."]:
+for frase in ["Ŝi venkis en la finalo de Wimbledon post tri setoj kontraŭ la unua en la mondo.",
+              "Li bezonis nur kvar batojn por la dek-oka truo kaj gajnis la Masters-turniron.",
+              "La nacia teamo de Nov-Zelando gajnis la mondan pokalon post fortega skramo."]:
     print(clasificar_texto(frase), "←", frase)
 """)
 
@@ -677,15 +726,19 @@ for frase in ["La elektrono havas negativan elektran ŝargon kaj tre malgrandan 
 md("""
 ## 4. Clasificación de páginas web
 
-Se eligen artículos de Vikipedio **que no están en el dataset** (se comprueba
-abajo) y se obtienen mediante *web scraping* de la **página HTML** con `requests`
-+ `BeautifulSoup` (no con el API): se eliminan `script`, `style`, tablas,
+Se eligen páginas **que no están en el dataset** (se comprueba abajo) y se
+obtienen mediante *web scraping* de la **página HTML** con `requests` +
+`BeautifulSoup` (no con el API): se eliminan `script`, `style`, tablas,
 navegación, referencias y cajas de información, y se extraen los párrafos `<p>`,
 que se limpian con la misma función que el dataset.
 
-Elegimos una página "fácil" por clase y una **ambigua** a propósito:
-*Fotosintezo* (fotosíntesis) es un proceso biológico pero descrito con mucho
-vocabulario químico y de energía.
+* **Tenis**: una noticia de **Vikinovaĵoj** (otra web, no Vikipedio) sobre
+  Coco Gauff ganando el US Open.
+* **Golf** y **rugby**: dos artículos de Vikipedio reservados (`HOLDOUT_TITLES`)
+  y excluidos del dataset: *Golfejo* (campo de golf) y *Rugbea Monda Pokalo*
+  (Copa del Mundo de rugby).
+* **Pádel**: el artículo *Padelo (sporto)*. No hay clase de pádel, así que se
+  mira a qué deporte lo acerca el modelo (lo esperable es el tenis).
 
 **Robustez**: si una web falla (sin conexión, error HTTP, cambio de formato),
 se usa una copia de respaldo publicada en el repositorio; si eso también falla,
@@ -693,10 +746,10 @@ esa página se omite con un aviso, pero el cuaderno sigue.
 """)
 code("""
 PAGINAS = {
-    "https://eo.wikipedia.org/wiki/Nigra_truo": "fiziko",     # agujero negro
-    "https://eo.wikipedia.org/wiki/Acido": "kemio",           # ácido
-    "https://eo.wikipedia.org/wiki/Mitozo": "biologio",       # mitosis
-    "https://eo.wikipedia.org/wiki/Fotosintezo": "biologio",  # fotosíntesis (ambigua)
+    "https://eo.wikinews.org/wiki/Usona_tenisisto_Coco_Gauff_gajnis_la_tenisturniron_US_Open": "teniso",
+    "https://eo.wikipedia.org/wiki/Golfejo": "golfo",
+    "https://eo.wikipedia.org/wiki/Rugbea_Monda_Pokalo": "rugbeo",
+    "https://eo.wikipedia.org/wiki/Padelo_(sporto)": "(pádel: sin clase)",
 }
 titulos_dataset = set(df["title"])
 for url in PAGINAS:

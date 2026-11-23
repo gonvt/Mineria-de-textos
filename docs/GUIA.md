@@ -8,41 +8,58 @@ modificar cualquier parte en la defensa oral: conviene leerlo junto al cuaderno.
 
 ## 1. Fase 1 – Dataset (`eonlp/dataset.py`)
 
+### Temática
+
+**Deportes**: `teniso` (tenis), `golfo` (golf) y `rugbeo` (rugby). Son cercanos
+(jugadores, torneos, campeones, pelota, puntos, olimpiadas...), así que el
+problema no es trivial.
+
+**¿Por qué no pádel?** La elección inicial era pádel, golf y rugby, pero la
+Vikipedio en Esperanto solo tiene un artículo de pádel de 4 frases
+(*Padelo (sporto)*) y no hay otras fuentes en Esperanto. Con ~5 párrafos no se
+puede entrenar una clase, así que se sustituyó por tenis, el deporte más
+parecido. El artículo de pádel se clasifica al final como experimento.
+**Conviene comentarlo con el profesor**, que es quien valida las categorías.
+
 ### Qué hace
 
 | Función | Qué hace |
 |---|---|
 | `api_get` | Petición GET al API de Vikipedio con **4 reintentos** y espera creciente. Nunca lanza excepción: devuelve `None` si falla. |
-| `category_members` | Lista páginas (`cmnamespace=0`) o subcategorías (`14`) de una categoría, siguiendo `cmcontinue` si hay más de 500. |
-| `collect_titles` | **Recorrido en anchura (BFS)**: primero los artículos de la categoría raíz, luego los de sus subcategorías, hasta 2 niveles o 300 artículos. Ignora títulos que empiezan por *Listo* (listas). |
+| `category_members` | Lista páginas (`cmnamespace=0`) o subcategorías (`14`) de una categoría, siguiendo `cmcontinue`. |
+| `collect_titles` | **Recorrido en anchura (BFS)** de la categoría del deporte y sus subcategorías (jugadores, torneos...) hasta 3 niveles. |
+| `search_titles` | **Buscador** del API (`list=search`): artículos cuyo texto menciona el deporte. Hace falta porque las categorías son pequeñas (golf y rugby tienen menos de 20 artículos). |
 | `fetch_extract` | Texto plano del artículo (`prop=extracts&explaintext=1`): el API ya quita HTML, plantillas y enlaces. |
 | `split_paragraphs` | Corta por saltos de línea, ignora títulos `== ... ==` y **se detiene** en *Vidu ankaŭ, Referencoj, Notoj, Eksteraj ligiloj...* |
 | `clean_paragraph` | Quita URLs, referencias `[1]`, LaTeX, cambia `;` por `,`; descarta párrafos de < 15 palabras o con < 75 % de letras; recorta a 300 palabras. |
-| `build_dataset` | Junta todo, descarta artículos que estén en **dos clases** y párrafos **duplicados**. |
+| `build_dataset` | Aplica las reglas de abajo, quita duplicados y devuelve `text;class` (+ `title` y `source`). |
 | `save_dataset` | Escribe el CSV con el contrato: UTF-8, `;`, cabecera `text;class`. |
 
 ### Decisiones que hay que saber justificar
 
-* **¿Por qué física, química y biología?** Son cercanas (comparten
-  *energio, atomo, molekulo, ĉelo, reakcio*), así que el problema no es trivial,
-  y Vikipedio tiene suficientes artículos de las tres.
-* **¿Por qué se excluyen subcategorías?** `EXCLUDED_SUBCATEGORIES` quita
-  biografías (*-istoj*, *-ologoj*), listas, organizaciones, premios, esbozos
-  (*Ĝermoj*) y las interdisciplinares (*Biofiziko, Biokemio, Kvantuma kemio*):
-  sus párrafos serían de dos clases a la vez. *Metalurgio* y *Kemia industrio*
-  se quitaron tras ver que el BFS acababa en artículos de fábricas de acero.
+* **Dos fuentes, dos reglas.** Artículo de la **categoría** → se guardan todos
+  sus párrafos (heredan la etiqueta, con ruido). Artículo del **buscador** →
+  solo los párrafos que contienen una **palabra clave** del deporte (`TOPICS`):
+  de un artículo sobre los Juegos Olímpicos de 1920 solo interesa el párrafo
+  del torneo de rugby.
+* **"Golfo" es ambiguo**: en Esperanto también es un golfo geográfico (*Golfo
+  de Meksiko*). Las palabras clave de golf son solo derivados inequívocos
+  (*golfludo, golfejo, golfisto, golfbastono...*). Hay un test para esto.
+* **Párrafos con dos deportes** (p. ej. resúmenes de olimpiadas) → se
+  descartan por ambiguos.
+* **Subcategorías excluidas**: *Usona piedpilko* y *NFL* cuelgan de *Rugbeo*
+  en Vikipedio pero son fútbol americano.
+* **Páginas reservadas** (`HOLDOUT_TITLES`): *Golfejo*, *Rugbea Monda Pokalo* y
+  *Padelo (sporto)* se excluyen del dataset para usarlas en la prueba web.
 * **¿Por qué se guarda el título?** Para la partición por artículo en la
-  Fase 3. El contrato (`data/dataset.csv`) solo tiene `text;class`; el título
-  va en un fichero aparte (`data/dataset_con_titulos.csv`).
-* **Ejecución asíncrona**: generar el dataset son ~900 peticiones (10–15 min).
-  Por eso el CSV ya generado está publicado en `data/` y el cuaderno lo
-  descarga si `GENERAR_DATASET = False`. El código de generación sigue estando
-  en el cuaderno (requisito del enunciado).
-* **Ruido**: cada párrafo hereda la etiqueta del artículo. Se mide de dos formas
-  (sección 1.5 y 3.5 del cuaderno): párrafos sin vocabulario de dominio
-  (≈23 %, medida gruesa) y párrafos que el clasificador contradice con
-  probabilidad > 0.8 en validación cruzada (≈5.6 %). Entrenar sin esos
-  párrafos apenas cambia el F1 (0.850 → 0.852).
+  Fase 3. El contrato (`data/dataset.csv`) solo tiene `text;class`; el título y
+  la fuente van en `data/dataset_con_titulos.csv`.
+* **Ejecución asíncrona**: generar el dataset son ~1 150 peticiones (≈15 min).
+  Por eso el CSV ya generado está en `data/` y el cuaderno lo descarga si
+  `GENERAR_DATASET = False`. El código de generación sigue en el cuaderno.
+* **Riesgo de la palabra clave**: como los párrafos del buscador se eligieron
+  por contener *tenis-/golf-/rugbe-*, el modelo podría limitarse a buscar esa
+  palabra. La sección 3.6 del cuaderno lo mide quitándolas.
 
 ---
 
