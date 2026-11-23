@@ -813,11 +813,11 @@ Naive Bayes multiplica la evidencia de miles de palabras y la probabilidad se
 satura a 0 % / 100 %, lo que no informa de la mezcla de temas. La media de
 párrafos sí lo hace (y el modelo se entrenó precisamente con párrafos).
 
-La clasificación **párrafo a párrafo** de la página ambigua muestra qué partes
-tiran hacia cada categoría:
+La clasificación **párrafo a párrafo** muestra qué partes de una página tiran
+hacia cada categoría (aquí, la página de pádel):
 """)
 code("""
-for nombre in list(detalle)[-1:]:   # la página ambigua
+for nombre in list(detalle)[-1:]:   # la página de pádel
     d = detalle[nombre]
     d["predicción"] = d[clases].idxmax(axis=1)
     print(f"{nombre}: reparto de párrafos →", d["predicción"].value_counts().to_dict())
@@ -830,39 +830,44 @@ for nombre in list(detalle)[-1:]:   # la página ambigua
 md("""
 ## 5. Conclusiones
 
-* **Dataset**: más de 1 500 párrafos por clase obtenidos automáticamente de
-  Vikipedio, con un *script* reproducible y tolerante a fallos. El etiquetado
-  heredado del artículo introduce ruido, que se ha medido de dos formas
-  (vocabulario de dominio y desacuerdo del clasificador).
+* **Dataset**: 1 512 párrafos de 730 artículos obtenidos automáticamente de
+  Vikipedio, con un *script* reproducible y tolerante a fallos. La mayor
+  dificultad ha sido la **falta de texto deportivo en Esperanto**: el pádel
+  tuvo que sustituirse por el tenis y el golf se queda en 218 párrafos, por
+  debajo de los 300 recomendados, aun combinando categoría y buscador. El ruido
+  de etiquetado se ha medido de dos formas (≈18 % de párrafos de la categoría
+  sin vocabulario deportivo; ≈3 % que el clasificador contradice con seguridad).
 * **Modelo de NLP**: la regularidad del Esperanto permite un tokenizador,
   lematizador, etiquetador morfológico y gestor de stop-words basado en reglas,
-  con un API como el de spaCy (`nlp(texto)` → `Doc` → `Token`), que acierta casi
+  con un API como el de spaCy (`nlp(texto)` → `Doc` → `Token`), que acierta
   todos los tokens del *gold standard*.
-* **Clasificación**: las representaciones que usan el modelo de NLP (lema o
-  raíz) mejoran ligeramente a la palabra sin procesar y reducen el vocabulario
-  casi a la mitad. Naive Bayes es el mejor modelo y consigue un F1 macro de
-  ≈0.80 en validación cruzada por artículo y ≈0.85 en el test. La validación
-  aleatoria por párrafos daría ≈0.89, una cifra inflada por la fuga de
-  información entre párrafos del mismo artículo.
-* **Web**: las tres páginas "claras" (*Nigra truo*, *Acido*, *Mitozo*) se
-  clasifican correctamente con mucha seguridad. La página ambigua,
-  *Fotosintezo*, sale como **química**: la mayoría de sus párrafos describen
-  reacciones, moléculas y energía (es, en realidad, bioquímica). Es un resultado
-  razonable, que además se explica por una decisión de la Fase 1: se excluyó la
-  subcategoría *Biokemio* del dataset, así que el modelo asocia ese vocabulario
-  a la química.
+* **Clasificación**: la representación por **raíces** (que da el modelo de NLP)
+  es la mejor y reduce el vocabulario un 26 % respecto a la palabra sin
+  procesar. El mejor modelo es la SVM lineal: F1 macro ≈0.84 en validación
+  cruzada por artículo y ≈0.87 en el test. La validación aleatoria por
+  párrafos daría ≈0.92, una cifra inflada por la fuga de información entre
+  párrafos del mismo artículo.
+* **Dependencia del nombre del deporte**: si se borran las palabras
+  *tenis-/golf-/rugbe-*, el F1 cae a ≈0.66. El modelo se apoya mucho en ellas,
+  en parte porque los párrafos del buscador se eligieron justo por contenerlas.
+  Con más texto se podría aprender mejor el vocabulario propio de cada deporte
+  (*seto, truo, skramo*...). Se ve también en las frases de ejemplo de 3.7: sin
+  la palabra del deporte, el modelo tiende a decir **tenis**, la clase mayoritaria.
+* **Web**: las tres páginas reales se clasifican bien con mucha seguridad
+  (la noticia de Vikinovaĵoj, *Golfejo* y *Rugbea Monda Pokalo*). La página de
+  **pádel** se asigna al **tenis** (≈100 %), lo cual es lógico: el texto lo
+  describe como "una mezcla de tenis y squash" y habla de raqueta y pelota de tenis.
 
 **Limitaciones y mejoras posibles**:
 
+* Poco texto de golf y rugby, y desbalanceo hacia el tenis. Se podrían añadir
+  otras fuentes en Esperanto (prensa, foros) o artículos traducidos.
+* Ruido conocido: el artículo *Ofsajdo* (fuera de juego), en la categoría de
+  rugby, habla también de fútbol y hockey sobre hielo.
 * El léxico cerrado no es exhaustivo y las reglas de participios generan algún
   falso positivo (*konstanta*), que se corrige con una lista de excepciones.
 * El *gold standard* de la Fase 2 es pequeño (10 frases); un 100 % en él no
   significa que el modelo no se equivoque en textos reales.
-* Algunos artículos muy largos pesan demasiado en su clase (p. ej. *masaĝ* entre
-  las palabras más discriminantes de biología viene de un único artículo largo).
-  Se podría limitar el número de párrafos por artículo.
-* El dataset se podría limpiar más eliminando los párrafos genéricos detectados
-  en 3.5, aunque en nuestras pruebas apenas cambia el resultado.
 """)
 
 nb = nbf.v4.new_notebook()

@@ -128,20 +128,26 @@ Se comparan por **lema**, así *estas/estis/estos* son stop-words por *esti*.
 * `make_vectorizer`: **TF-IDF** con `sublinear_tf=True` (log de la frecuencia),
   `min_df=2` (quita palabras que salen una sola vez) y `max_df=0.9`.
 * `candidate_models`: Naive Bayes multinomial, regresión logística y SVM lineal.
+* **Desbalanceo** (966 tenis / 328 rugby / 218 golf): NB con `fit_prior=False`
+  y los modelos lineales con `class_weight="balanced"`; métrica principal F1 macro.
 * **Evaluación**: `StratifiedGroupKFold` agrupando por **artículo**. Con una
-  validación aleatoria el F1 sube de 0.81 a 0.89, pero es engañoso: párrafos del
+  validación aleatoria el F1 sube de 0.84 a 0.92, pero es engañoso: párrafos del
   mismo artículo en train y test comparten nombres y términos concretos.
-* Se elige la mejor combinación (Naive Bayes + raíces, con bigramas,
-  `alpha=0.1`), se evalúa en un test del 20 % de artículos (accuracy 0.85,
-  F1 macro 0.85) y se reentrena con todo para clasificar las webs.
+* Se elige la mejor combinación (SVM lineal + raíces, `C=1`, sin bigramas). Como
+  la SVM no da probabilidades, se calibra con `CalibratedClassifierCV`. En test
+  (≈25 % de los artículos) obtiene accuracy 0.88 y F1 macro 0.87.
+* **Sección 3.6**: sin las palabras *tenis-/golf-/rugbe-* el F1 cae a 0.66. Es
+  la principal debilidad: el modelo se apoya en el nombre del deporte.
 
 ### Clasificación de páginas web
 
 * `fetch_html` + `html_to_paragraphs`: `requests` + `BeautifulSoup`; se quitan
   `script, style, nav, table, sup...` y las cajas de Wikipedia, y se extraen los
   `<p>`, limpiados con la misma función que el dataset.
-* Probabilidad de la página = **media de las probabilidades de sus párrafos**
-  (clasificar la página entera de golpe satura Naive Bayes a 0 %/100 %).
+* Páginas: una noticia de **Vikinovaĵoj** (tenis), *Golfejo* y *Rugbea Monda
+  Pokalo* (reservadas, fuera del dataset) y *Padelo (sporto)*. Todas aciertan;
+  el pádel sale como tenis.
+* Probabilidad de la página = **media de las probabilidades de sus párrafos**.
 * Si la web falla, se usa `data/web_snapshot.json` (copia de respaldo); si
   también falla, se omite la página con un aviso. El cuaderno nunca se rompe.
 
@@ -149,14 +155,17 @@ Se comparan por **lema**, así *estas/estis/estos* son stop-words por *esti*.
 
 ## 4. Preguntas probables en la defensa
 
-* *¿Cómo lematizas "belajn"?* → no está en el léxico; termina en `-ajn` →
-  adjetivo, plural, acusativo; lema = raíz `bel` + `a` = *bela*.
+* *¿Cómo lematizas "pilkojn"?* → no está en el léxico; termina en `-ojn` →
+  sustantivo, plural, acusativo; lema = raíz `pilk` + `o` = *pilko*.
 * *¿Qué pasa con "konstanta"?* → parece participio (`-ant-a`) pero está en la
   lista de excepciones, así que su lema es *konstanta*.
-* *¿Por qué Naive Bayes gana a la SVM?* → con textos cortos y muchas
-  palabras raras, NB generaliza mejor con pocos datos; además da probabilidades
-  directamente. Las diferencias son pequeñas (≈2 puntos).
-* *¿Por qué Fotosintezo sale como química?* → la mayoría de sus párrafos son
-  de reacciones y moléculas (bioquímica) y excluimos *Biokemio* del dataset.
-* *Cambia las categorías / añade una stop-word / usa otro modelo* → `CATEGORIES`
+* *¿Por qué no hay pádel?* → solo hay un artículo de 4 frases en Esperanto; se
+  cambió por tenis y el artículo de pádel se clasifica como prueba.
+* *¿Por qué golf tiene menos de 300 párrafos?* → es todo lo que hay en la
+  Vikipedio en Esperanto; se compensa con F1 macro y pesos de clase.
+* *¿Por qué "golfo" no es una palabra clave?* → también significa golfo
+  geográfico; se usan derivados (*golfludo, golfejo, golfisto*).
+* *¿El modelo solo mira el nombre del deporte?* → en parte sí (sección 3.6:
+  F1 0.84 → 0.66 sin esas palabras).
+* *Cambia las categorías / añade una stop-word / usa otro modelo* → `TOPICS`
   en la Fase 1, `nlp.add_stop_words([...])`, `candidate_models()`.
