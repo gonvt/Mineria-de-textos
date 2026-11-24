@@ -1,0 +1,882 @@
+"""Genera el cuaderno ``notebooks/clasificacion_esperanto.ipynb``.
+
+El enunciado exige que todo el código (descarga del dataset, modelo de NLP y
+clasificador) esté DENTRO del cuaderno. Para no tener el código duplicado a
+mano, la fuente única es el paquete ``eonlp/`` y este script copia el código
+de cada módulo en las celdas del cuaderno (quitando los ``import`` relativos).
+
+Uso::
+
+    python scripts/build_notebook.py            # solo genera el .ipynb
+    jupyter nbconvert --to notebook --execute --inplace notebooks/clasificacion_esperanto.ipynb
+"""
+
+from pathlib import Path
+
+import nbformat as nbf
+
+ROOT = Path(__file__).resolve().parents[1]
+PKG = ROOT / "eonlp"
+OUT = ROOT / "notebooks" / "clasificacion_esperanto.ipynb"
+REPO = "gonvt/Mineria-de-textos"
+import os
+
+BRANCH = os.environ.get("NB_BRANCH", "main")
+RAW = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+
+
+def module_source(name):
+    """Código del módulo sin los imports relativos (en el cuaderno todo es global)."""
+    lines = (PKG / f"{name}.py").read_text(encoding="utf-8").splitlines()
+    kept = [ln for ln in lines if not ln.startswith("from .")]
+    return f"# ===== Código de eonlp/{name}.py =====\n" + "\n".join(kept).strip() + "\n"
+
+
+cells = []
+
+
+def md(text):
+    cells.append(nbf.v4.new_markdown_cell(text.strip()))
+
+
+def code(text):
+    cells.append(nbf.v4.new_code_cell(text.strip()))
+
+
+# ==========================================================================
+# PORTADA
+# ==========================================================================
+md(f"""
+# Clasificación temática de textos en Esperanto
+### Práctica de programación · Minería de Textos · 4º INF · 2026/2027
+
+**Integrantes:** _(completar con los nombres del equipo)_
+
+[![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/{REPO}/blob/main/notebooks/clasificacion_esperanto.ipynb)
+
+En este cuaderno se construye, de principio a fin, un sistema que clasifica
+textos en **Esperanto** según el **deporte** del que hablan:
+
+| Clase | Categoría de Vikipedio | Deporte |
+|---|---|---|
+| `teniso` | [Kategorio:Teniso](https://eo.wikipedia.org/wiki/Kategorio:Teniso) | tenis |
+| `golfo` | [Kategorio:Golfo (sporto)](https://eo.wikipedia.org/wiki/Kategorio:Golfo_(sporto)) | golf |
+| `rugbeo` | [Kategorio:Rugbeo](https://eo.wikipedia.org/wiki/Kategorio:Rugbeo) | rugby |
+
+Los tres son deportes, **semánticamente cercanos**: comparten vocabulario
+(*ludanto, pilko, turniro, ĉampiono, teamo, poento, matĉo, olimpiko*...), así
+que el problema no es trivial.
+
+> **Nota sobre el pádel.** La temática elegida inicialmente era *pádel, golf y
+> rugby*, pero la Vikipedio en Esperanto solo tiene **un artículo de pádel de
+> cuatro frases** ([Padelo (sporto)](https://eo.wikipedia.org/wiki/Padelo_(sporto))),
+> y no se encontró otra fuente en Esperanto. Con ~5 párrafos no se puede
+> entrenar una clase (el enunciado recomienda más de 300), así que se sustituyó
+> por el **tenis**, el deporte más parecido. El artículo de pádel se usa al
+> final como prueba: ¿a qué deporte se parece según el modelo?
+
+**Índice**
+
+0. Configuración y parámetros
+1. **Fase 1 – Dataset**: descarga de Vikipedio, limpieza y división en párrafos
+2. **Fase 2 – NLP**: modelo propio para Esperanto con API tipo spaCy
+3. **Fase 3 – Clasificación**: vectorización TF-IDF, entrenamiento y evaluación
+4. **Clasificación de páginas web** reales mediante *web scraping*
+5. Conclusiones
+
+> El código de las fases 1–3 también está organizado como librería instalable
+> (`pip install git+https://github.com/{REPO}`) con tests, en la carpeta `eonlp/`
+> del repositorio. Este cuaderno es **autocontenido**: no importa esa librería,
+> sino que incluye todo su código en las celdas.
+""")
+
+# ==========================================================================
+# 0. CONFIGURACIÓN
+# ==========================================================================
+md("""
+## 0. Configuración y parámetros
+
+Todos los parámetros de ejecución están en esta celda.
+
+* `GENERAR_DATASET = False` (por defecto): se usa el dataset ya generado y
+  publicado en GitHub (*ejecución asíncrona*, sección 4.1.4 del enunciado).
+  Así el cuaderno tarda menos de 2 minutos.
+* `GENERAR_DATASET = True`: se ejecuta el *script* de la Fase 1 y se descarga
+  todo de nuevo desde el API de Vikipedio (unos 10–15 minutos, ~900 peticiones).
+
+Si la descarga del dataset publicado falla, el cuaderno lo genera
+automáticamente desde Vikipedio (y viceversa): **sobrevive al fallo de cualquiera
+de las dos fuentes**.
+""")
+code(f"""
+# ---------------------------- PARÁMETROS ----------------------------------
+GENERAR_DATASET = False        # True = volver a descargar todo desde Vikipedio
+MAX_ARTICULOS_POR_CLASE = 400  # artículos de la categoría (solo si se genera)
+PROFUNDIDAD_SUBCATEGORIAS = 3  # niveles de subcategorías a recorrer
+MAX_BUSQUEDA = 500             # artículos por búsqueda en el buscador de Vikipedio
+SEED = 42                      # semilla para que los resultados sean reproducibles
+
+URL_DATASET = "{RAW}/data/dataset_con_titulos.csv"   # text;class;title
+URL_DATASET_CONTRATO = "{RAW}/data/dataset.csv"      # text;class (contrato de datos)
+URL_WEB_SNAPSHOT = "{RAW}/data/web_snapshot.json"     # copia de respaldo de las webs
+""")
+code("""
+import json
+import random
+import re
+import sys
+import time
+import unicodedata
+import warnings
+
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+import sklearn
+from bs4 import BeautifulSoup
+
+warnings.filterwarnings("ignore", category=UserWarning)
+random.seed(SEED)
+np.random.seed(SEED)
+
+pd.set_option("display.max_colwidth", 120)
+plt.rcParams.update({"figure.dpi": 110, "axes.spines.top": False, "axes.spines.right": False})
+COLORES = {"teniso": "#d9822b", "golfo": "#3a9a5b", "rugbeo": "#2a78b5"}
+
+print("Python      ", sys.version.split()[0])
+for lib in (pd, np, sklearn, matplotlib, requests):
+    print(f"{lib.__name__:<12}", lib.__version__)
+""")
+
+# ==========================================================================
+# FASE 1
+# ==========================================================================
+md("""
+## 1. Fase 1 – Dataset
+
+### 1.1 Fuente de datos y temáticas
+
+Se usa el **API de MediaWiki de Vikipedio** (`eo.wikipedia.org/w/api.php`):
+
+1. `list=categorymembers` para recorrer la categoría de cada deporte **en
+   anchura (BFS)** y sus subcategorías (jugadores, torneos, equipos...) hasta 3
+   niveles.
+2. `list=search` (buscador): las categorías deportivas de Vikipedio son
+   **pequeñas** (golf y rugby tienen menos de 20 artículos), así que se añaden
+   los artículos que **mencionan** el deporte: biografías, Juegos Olímpicos,
+   estadios, ciudades...
+3. `prop=extracts&explaintext=1` para obtener el **texto plano** de cada artículo
+   (sin HTML, plantillas ni enlaces).
+
+**Decisiones de diseño**
+
+* **Dos fuentes, dos reglas**: de los artículos de la **categoría** se guardan
+  todos los párrafos (heredan la etiqueta). De los encontrados con el
+  **buscador** solo se guardan los párrafos que contienen una **palabra clave**
+  del deporte (`tenis…`, `rugbe…`, `golfludo/golfejo/golfisto…`): un artículo
+  sobre una ciudad no es de rugby, pero su párrafo sobre el equipo de rugby sí.
+* **"Golfo" es ambiguo** en Esperanto: también es un golfo geográfico (*Golfo de
+  Meksiko*). Por eso las palabras clave de golf son solo derivados inequívocos.
+* **Subcategorías excluidas**: el fútbol americano y canadiense (*Usona
+  piedpilko, NFL*) cuelgan de *Rugbeo* en Vikipedio, pero son otro deporte;
+  también videojuegos, esbozos y plantillas.
+* Un párrafo que menciona **dos de los deportes** (p. ej. un resumen de unos
+  Juegos Olímpicos) se descarta por ambiguo.
+* Las páginas reservadas para la prueba web (`HOLDOUT_TITLES`) se excluyen.
+* Cada artículo se divide en **párrafos**; se ignoran los títulos de sección y
+  todo lo que va después de *Vidu ankaŭ, Referencoj, Notoj, Eksteraj ligiloj*...
+* Limpieza: URLs, referencias `[1]`, fórmulas LaTeX, el carácter `;`
+  (contrato de datos) y párrafos con menos de 15 palabras o con menos de un
+  75 % de letras (tablas, listas de cifras).
+* Se eliminan los párrafos duplicados (textos de plantilla repetidos).
+* Las peticiones tienen **reintentos con espera** y nunca lanzan excepción:
+  si una petición falla, ese artículo simplemente se queda sin texto.
+""")
+code(module_source("dataset"))
+
+md("""
+### 1.2 Generar o cargar el dataset
+
+Se guarda además el **título del artículo** de cada párrafo. No forma parte del
+contrato de datos (`text;class`), pero es imprescindible para evaluar bien: los
+párrafos de un mismo artículo se parecen mucho entre sí, así que en la Fase 3 se
+separa train/test **por artículo** para no "hacer trampa".
+""")
+code("""
+def generar_dataset():
+    print("Descargando artículos de Vikipedio... (puede tardar ~15 min)")
+    t0 = time.time()
+    raw = download_articles(TOPICS, MAX_ARTICULOS_POR_CLASE, PROFUNDIDAD_SUBCATEGORIAS, MAX_BUSQUEDA)
+    df = build_dataset(raw)
+    print(f"Dataset generado en {time.time() - t0:.0f} s")
+    return df
+
+
+def cargar_dataset_publicado():
+    print("Cargando el dataset publicado en GitHub...")
+    return pd.read_csv(URL_DATASET, sep=";", encoding="utf-8")
+
+
+fuentes = [generar_dataset, cargar_dataset_publicado]
+if not GENERAR_DATASET:
+    fuentes.reverse()
+
+df = None
+for fuente in fuentes:
+    try:
+        df = fuente()
+        if df is not None and len(df) > 0:
+            break
+    except Exception as exc:  # el cuaderno debe sobrevivir a fallos de red
+        print(f"  [aviso] {fuente.__name__} falló: {type(exc).__name__}: {exc}")
+if df is None or len(df) == 0:
+    raise RuntimeError("No se pudo obtener el dataset de ninguna fuente.")
+
+# Guardar el dataset con el contrato de datos (útil para subirlo a GitHub)
+save_dataset(df, "dataset.csv")
+print(f"\\n{len(df)} párrafos · {df['title'].nunique()} artículos · guardado en dataset.csv")
+df.head()
+""")
+
+md("### 1.3 Verificación del contrato de datos")
+code("""
+contrato = pd.read_csv("dataset.csv", sep=";", encoding="utf-8")
+comprobaciones = {
+    "cabecera exacta 'text;class'": list(contrato.columns) == ["text", "class"],
+    "sin ';' en los párrafos": not contrato["text"].str.contains(";").any(),
+    "sin HTML": not contrato["text"].str.contains(r"<[a-zA-Z/][^>]*>").any(),
+    "sin URLs": not contrato["text"].str.contains(r"https?://|www\\.").any(),
+    "sin referencias [n]": not contrato["text"].str.contains(r"\\[\\d+\\]").any(),
+    "sin valores vacíos": not contrato.isna().any().any(),
+    "sin párrafos duplicados": not contrato["text"].duplicated().any(),
+}
+for regla, ok in comprobaciones.items():
+    print(("✅" if ok else "❌"), regla)
+assert all(comprobaciones.values())
+
+# Recomendación del enunciado (no obligatoria): más de 300 párrafos por clase
+for clase, n in contrato["class"].value_counts().items():
+    print(("✅" if n >= 300 else "⚠️ "), f"{clase}: {n} párrafos", "" if n >= 300 else "(menos de los 300 recomendados)")
+""")
+
+md("### 1.4 Exploración del dataset")
+code("""
+resumen = df.groupby("class").agg(
+    parrafos=("text", "size"),
+    articulos=("title", "nunique"),
+    palabras_media=("text", lambda s: s.str.split().str.len().mean()),
+).round(1).loc[list(TOPICS)]
+display(resumen)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 3.6))
+resumen["parrafos"].plot.bar(ax=axes[0], color=[COLORES[c] for c in resumen.index], rot=0)
+axes[0].set_title("Párrafos por clase")
+for c in TOPICS:
+    df.loc[df["class"] == c, "text"].str.split().str.len().clip(upper=200).plot.hist(
+        ax=axes[1], bins=40, alpha=0.55, color=COLORES[c], label=c)
+axes[1].set_title("Longitud de los párrafos (palabras)"); axes[1].legend()
+df.groupby("title").size().clip(upper=40).plot.hist(ax=axes[2], bins=40, color="grey")
+axes[2].set_title("Párrafos por artículo")
+plt.tight_layout(); plt.show()
+""")
+md("""
+**Limitación de los datos.** El dataset está **desbalanceado**: hay unas
+cuatro veces más tenis que golf. La Vikipedio en Esperanto tiene mucho más
+contenido de tenis (cientos de biografías de tenistas) que de golf o rugby, y
+el golf **no llega a los 300 párrafos recomendados**: se recogieron todos los
+párrafos de golf que hay (la categoría tiene 17 artículos y el buscador apenas
+añade un centenar más). Por eso se bajó el mínimo de palabras por párrafo a 10.
+
+Cómo se compensa: no se re-muestrea (se perderían datos de tenis), sino que
+**F1 macro** es la métrica principal (pesa igual las tres clases), Naive Bayes
+usa probabilidades *a priori* uniformes (`fit_prior=False`) y los modelos
+lineales usan `class_weight="balanced"`. La partición train/test se hace por
+artículo.
+""")
+code("""
+for c in TOPICS:
+    ejemplo = df[df["class"] == c].sample(1, random_state=SEED).iloc[0]
+    print(f"[{c}] ({ejemplo['title']})\\n  {ejemplo['text'][:300]}\\n")
+""")
+
+md("""
+### 1.5 Ruido de etiquetado (primera aproximación)
+
+Los párrafos de los artículos de la categoría **heredan la etiqueta**, pero
+muchos son genéricos: fechas, vida privada de un jugador, historia de un club...
+(*"Ĝi estis fondita en 1950"*). Una medida sencilla del ruido: buscar párrafos
+que **no contienen ningún término deportivo** de su deporte. Se define una lista
+propia de raíces de cada deporte (sin usar el modelo, para no tener un
+razonamiento circular). Los párrafos del buscador cumplen esto por construcción
+(contienen la palabra clave), así que se mide solo sobre los de la categoría.
+En la Fase 3 se mide el ruido de una segunda forma, con el propio clasificador.
+""")
+code("""
+RAICES_DOMINIO = {
+    "teniso": ["tenis", "raked", "servo", "seto", "ATP", "WTA", "Grand Slam", "Wimbledon",
+               "Roland", "Davis", "duobl", "unuopa", "turnir", "ludant", "matĉ"],
+    "golfo": ["golf", "truo", "bastono", "PGA", "Masters", "Ryder", "ludant",
+              "turnir", "ĉampion", "klub"],
+    "rugbeo": ["rugbe", "ludant", "teamo", "matĉ", "provo", "pokal", "ŝlem", "ligo",
+               "klub", "ĉampion", "Ses Nacioj", "turnir"],
+}
+patrones = {c: re.compile("|".join(map(re.escape, rs)), re.IGNORECASE) for c, rs in RAICES_DOMINIO.items()}
+df["sin_termino_de_dominio"] = [not patrones[c].search(t) for t, c in zip(df["text"], df["class"])]
+
+de_categoria = df[df["source"] == "kategorio"]
+ruido_heuristico = de_categoria.groupby("class")["sin_termino_de_dominio"].mean().mul(100).round(1)
+print("Párrafos de la categoría SIN ningún término de su deporte (%):")
+print(ruido_heuristico.reindex(list(TOPICS)).to_string(),
+      f"\\nTotal: {de_categoria['sin_termino_de_dominio'].mean()*100:.1f} % "
+      f"({de_categoria['sin_termino_de_dominio'].sum()} párrafos)")
+print("\\nEjemplos:")
+for t in de_categoria[de_categoria["sin_termino_de_dominio"]].sample(4, random_state=SEED)["text"]:
+    print(" ·", t[:160])
+""")
+
+# ==========================================================================
+# FASE 2
+# ==========================================================================
+md("""
+## 2. Fase 2 – Modelo de NLP para Esperanto
+
+Se implementa **desde cero** (sin spaCy, NLTK ni Stanza) un modelo basado en
+reglas con un API como el de spaCy:
+
+```python
+nlp = load()
+doc = nlp("La katoj manĝis fiŝon.")
+for token in doc:
+    token.text, token.lemma_, token.pos_, token.morph, token.is_stop
+```
+
+**¿Por qué funcionan las reglas?** El Esperanto marca la categoría gramatical
+con la terminación, sin excepciones:
+
+| Terminación | Categoría | Rasgos | Ejemplo → lema |
+|---|---|---|---|
+| `-o` (`-oj`, `-on`, `-ojn`) | sustantivo `NOUN` | número, caso | *pilkojn* → *pilko* |
+| `-a` (`-aj`, `-an`, `-ajn`) | adjetivo `ADJ` | número, caso | *tenisajn* → *tenisa* |
+| `-e` (`-en`) | adverbio `ADV` | dirección | *rapide* → *rapide* |
+| `-as` / `-is` / `-os` | verbo `VERB` | presente / pasado / futuro | *trovis* → *trovi* |
+| `-us` / `-u` / `-i` | verbo `VERB` | condicional / imperativo / infinitivo | *estu* → *esti* |
+| `-ant- -int- -ont- -at- -it- -ot-` | participio | aspecto, voz | *skribita* → *skribi* |
+
+Las palabras que no siguen estas reglas son de **clase cerrada** (artículo,
+pronombres, la tabla de 45 correlativos, preposiciones, conjunciones,
+numerales...) y se buscan en un **léxico** antes de aplicar las reglas.
+
+**Pipeline** (`nlp.pipe_names`):
+
+1. `normalizer`: Unicode NFC, apóstrofos y **sistema‑x** (`cx` → `ĉ`, `sx` → `ŝ`).
+2. `tokenizer`: expresión regular (palabras con guion y elisión `l'`, números, URLs, signos).
+3. `tagger`: UPOS + rasgos morfológicos (Universal Dependencies) por léxico y terminaciones.
+   Mayúscula en mitad de oración → `PROPN`; letras `q w x y` → palabra extranjera.
+4. `lemmatizer`: forma de diccionario y **descomposición en morfemas**
+   (`malsanulejo` → `mal + san + ul + ej + o`) con prefijos/sufijos oficiales.
+5. `stopwords`: `token.is_stop` a partir de una lista de **lemas** (así *estas,
+   estis, estos* son todas stop-word por el lema *esti*).
+
+También unifica variantes ortográficas con *ĥ* (*ĥemio* → *kemio*), muy
+frecuentes en Vikipedio.
+""")
+code(module_source("lexicon"))
+code(module_source("nlp"))
+
+md("### 2.1 Demostración del API")
+code("""
+nlp = load()
+print(nlp)
+doc = nlp("La junaj sciencistoj malkovris novajn elementojn en la laboratorio de Marie Curie, "
+          "kaj ili skribos artikolon pri la radioaktiveco.")
+pd.DataFrame(doc.to_table())
+""")
+code("""
+# Oraciones, morfemas, sistema-x y stop-words
+doc = nlp("Mi sxatas la malsanulejon. Cxu vi vidis la ĉielarkon hieraŭ?")
+print("Oraciones:", [s.text for s in doc.sents])
+print("Normalizado (sistema-x):", doc.text)
+for palabra in ["malsanulejo", "ĉielarko", "lernejestro", "maljuneco", "fotosintezo"]:
+    print(f"  {palabra:<12} → morfemas {nlp(palabra)[0].morphemes}")
+print("Stop-words en el texto:", [t.text for t in doc if t.is_stop])
+print("Tamaño de la lista de stop-words:", len(nlp.stop_words))
+""")
+
+md("""
+### 2.2 Evaluación del modelo sobre un pequeño *gold standard*
+
+Para comprobar que el etiquetador funciona se anotan a mano unas frases
+(etiqueta UPOS y lema esperados) y se mide la exactitud.
+""")
+code("""
+GOLD = [
+    ("La katoj manĝis fiŝon .", "DET NOUN VERB NOUN PUNCT", "la kato manĝi fiŝo ."),
+    ("Mi ŝatas legi interesajn librojn .", "PRON VERB VERB ADJ NOUN PUNCT", "mi ŝati legi interesa libro ."),
+    ("Kiuj sciencistoj malkovris la elektronon ?", "DET NOUN VERB DET NOUN PUNCT", "kiu sciencisto malkovri la elektrono ?"),
+    ("La akvo bolas je cent gradoj .", "DET NOUN VERB ADP NUM NOUN PUNCT", "la akvo boli je cent grado ."),
+    ("Ŝi iras hejmen rapide ĉar pluvas .", "PRON VERB ADV ADV SCONJ VERB PUNCT", "ŝi iri hejme rapide ĉar pluvi ."),
+    ("Ĉiuj vivaj ĉeloj enhavas DNA kaj proteinojn .", "DET ADJ NOUN VERB PROPN CCONJ NOUN PUNCT", "ĉiu viva ĉelo enhavi DNA kaj proteino ."),
+    ("La skribita letero estis sendita al Parizo .", "DET ADJ NOUN VERB ADJ ADP PROPN PUNCT", "la skribi letero esti sendi al Parizo ."),
+    ("Se vi volus , ni povus helpi vin .", "SCONJ PRON VERB PUNCT PRON VERB VERB PRON PUNCT", "se vi voli , ni povi helpi vi ."),
+    ("Tiu ĉi reakcio produktas varmon kaj lumon .", "DET PART NOUN VERB NOUN CCONJ NOUN PUNCT", "tiu ĉi reakcio produkti varmo kaj lumo ."),
+    ("La dua leĝo de Newton priskribas la forton .", "DET ADJ NOUN ADP PROPN VERB DET NOUN PUNCT", "la dua leĝo de Newton priskribi la forto ."),
+]
+aciertos_pos = aciertos_lema = total = 0
+errores = []
+for frase, pos, lemas in GOLD:
+    doc = nlp(frase)
+    for tok, p, l in zip(doc, pos.split(), lemas.split()):
+        total += 1
+        aciertos_pos += tok.pos_ == p
+        aciertos_lema += tok.lemma_ == l
+        if tok.pos_ != p or tok.lemma_ != l:
+            errores.append((tok.text, tok.pos_, p, tok.lemma_, l))
+print(f"Exactitud POS:   {aciertos_pos/total:.1%}  ({total} tokens)")
+print(f"Exactitud lemas: {aciertos_lema/total:.1%}")
+if errores:
+    display(pd.DataFrame(errores, columns=["token", "pos_pred", "pos_gold", "lema_pred", "lema_gold"]))
+""")
+md("""
+### 2.3 El modelo sobre el corpus
+
+Distribución de categorías gramaticales en el dataset y palabras que el modelo
+no sabe clasificar (`X`). Esto sirve para detectar casos que las reglas no
+cubren (palabras extranjeras, fórmulas químicas, abreviaturas).
+""")
+code("""
+t0 = time.time()
+docs = list(nlp.pipe(df["text"]))
+print(f"{len(docs)} párrafos procesados en {time.time() - t0:.1f} s "
+      f"({sum(len(d) for d in docs):,} tokens)")
+
+conteo_pos = pd.Series([t.pos_ for d in docs for t in d]).value_counts()
+ax = (conteo_pos / conteo_pos.sum() * 100).plot.barh(figsize=(7, 4), color="#555")
+ax.invert_yaxis(); ax.set_xlabel("% de tokens"); ax.set_title("Categorías gramaticales en el corpus")
+plt.show()
+desconocidas = pd.Series([t.text for d in docs for t in d if t.pos_ == "X"]).value_counts()
+print("Palabras más frecuentes etiquetadas como X:", list(desconocidas.head(15).index))
+""")
+
+# ==========================================================================
+# FASE 3
+# ==========================================================================
+md("""
+## 3. Fase 3 – Clasificación
+
+### 3.1 Representación tabular (vectorización)
+
+Cada párrafo se convierte, con el modelo de la Fase 2, en la lista de
+**lemas de las palabras con contenido** (sustantivos, nombres propios,
+adjetivos, verbos y adverbios), sin stop-words, números ni signos. Después se
+aplica **TF-IDF** (`sublinear_tf`, `min_df=2`, `max_df=0.9`).
+
+Se comparan tres representaciones para justificar el uso del modelo de NLP:
+
+* `text`: palabra en minúsculas, **sin lematizar** (línea base);
+* `lemma`: **lema** (`pilkojn`, `pilko` → `pilko`);
+* `root`: **raíz** sin terminación (`tenisa`, `teniso` → `tenis`).
+""")
+code(module_source("classify"))
+code("""
+t0 = time.time()
+# Reutilizamos los Doc ya procesados en la sección 2.3 (una sola pasada del modelo)
+REPRESENTACIONES = {m: [" ".join(doc_to_features(d, m)) for d in docs] for m in ("text", "lemma", "root")}
+print(f"Preprocesado en {time.time() - t0:.1f} s")
+print("Original :", df['text'][0][:150])
+print("lemma    :", REPRESENTACIONES['lemma'][0][:150])
+print("root     :", REPRESENTACIONES['root'][0][:150])
+
+for m, X_txt in REPRESENTACIONES.items():
+    print(f"{m:<6} → vocabulario TF-IDF de {make_vectorizer().fit(X_txt).transform(X_txt).shape[1]:,} términos")
+""")
+
+md("""
+### 3.2 Metodología de evaluación
+
+* **Validación cruzada de 5 particiones agrupada por artículo**
+  (`StratifiedGroupKFold`): todos los párrafos de un mismo artículo caen en la
+  misma partición. Si se mezclan, el modelo "reconoce" el artículo (nombres
+  propios, términos concretos) y la nota se infla artificialmente (se muestra
+  abajo).
+* Métricas: **accuracy** y **F1 macro** (media de las tres clases, robusta al
+  desbalanceo).
+* Con la mejor configuración se hace una partición **train/test 80/20 por
+  artículo** y se dan la matriz de confusión y el informe por clase.
+* Clasificadores ligeros: Naive Bayes multinomial, regresión logística y SVM
+  lineal (todo se entrena en segundos sin GPU).
+""")
+code("""
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold, cross_validate
+
+y = df["class"].values
+grupos = df["title"].values
+cv_grupos = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=SEED)
+
+filas = []
+t0 = time.time()
+for rep, X_txt in REPRESENTACIONES.items():
+    for nombre, modelo in candidate_models().items():
+        r = cross_validate(build_pipeline(modelo), X_txt, y, groups=grupos, cv=cv_grupos,
+                           scoring=["accuracy", "f1_macro"], n_jobs=-1)
+        filas.append({"representación": rep, "modelo": nombre,
+                      "accuracy": r["test_accuracy"].mean(), "f1_macro": r["test_f1_macro"].mean(),
+                      "f1_std": r["test_f1_macro"].std()})
+comparativa = pd.DataFrame(filas).sort_values("f1_macro", ascending=False).reset_index(drop=True)
+print(f"Validación cruzada completada en {time.time() - t0:.0f} s")
+display(comparativa.style.format({"accuracy": "{:.3f}", "f1_macro": "{:.3f}", "f1_std": "±{:.3f}"})
+        .background_gradient(subset=["f1_macro"], cmap="Greens"))
+""")
+code("""
+pivot = comparativa.pivot(index="modelo", columns="representación", values="f1_macro")[["text", "lemma", "root"]]
+ax = pivot.plot.bar(figsize=(8, 3.8), rot=0, color=["#bbb", "#2a78b5", "#7fb3d5"])
+ax.set_ylim(pivot.values.min() - 0.05, pivot.values.max() + 0.02)
+ax.set_ylabel("F1 macro (CV por artículo)"); ax.set_title("Comparación de representaciones y modelos")
+ax.legend(title="representación", loc="lower right"); plt.show()
+""")
+
+md("""
+#### Ajuste de hiperparámetros
+
+Sobre la mejor representación se ajusta el hiperparámetro principal del mejor
+modelo y se prueba si añadir **bigramas** ayuda (p. ej. *granda ŝlemo*,
+*nacia teamo*).
+""")
+code("""
+from sklearn.model_selection import GridSearchCV
+
+mejor = comparativa.iloc[0]
+REP = mejor["representación"]
+X_txt = REPRESENTACIONES[REP]
+modelo_base = candidate_models()[mejor["modelo"]]
+param = {"Naive Bayes": {"clf__alpha": [0.01, 0.05, 0.1, 0.3, 1.0]},
+         "Regresión logística": {"clf__C": [1, 3, 10, 30]},
+         "SVM lineal": {"clf__C": [0.1, 0.3, 1, 3]}}[mejor["modelo"]]
+param["tfidf__ngram_range"] = [(1, 1), (1, 2)]
+
+busqueda = GridSearchCV(build_pipeline(modelo_base), param, scoring="f1_macro", cv=cv_grupos, n_jobs=-1)
+busqueda.fit(X_txt, y, groups=grupos)
+print(f"Modelo: {mejor['modelo']} · representación: {REP}")
+print("Mejores hiperparámetros:", busqueda.best_params_, f"→ F1 macro CV = {busqueda.best_score_:.3f}")
+""")
+
+md("""
+#### ¿Por qué agrupar por artículo? (fuga de información)
+
+Misma configuración, evaluada con una validación cruzada **aleatoria** por párrafos:
+""")
+code("""
+cv_aleatoria = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+f1_aleatoria = cross_validate(busqueda.best_estimator_, X_txt, y, cv=cv_aleatoria,
+                              scoring="f1_macro", n_jobs=-1)["test_score"].mean()
+print(f"F1 macro con CV aleatoria por párrafo : {f1_aleatoria:.3f}  (optimista)")
+print(f"F1 macro con CV agrupada por artículo : {busqueda.best_score_:.3f}  (realista)")
+""")
+
+md("### 3.3 Modelo final: entrenamiento y evaluación en test")
+code("""
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             ConfusionMatrixDisplay, f1_score)
+
+# Partición 80/20 por artículo (la primera de las 5 particiones agrupadas ≈ 20 %)
+idx_train, idx_test = next(cv_grupos.split(X_txt, y, grupos))
+X_train = [X_txt[i] for i in idx_train]; X_test = [X_txt[i] for i in idx_test]
+y_train, y_test = y[idx_train], y[idx_test]
+print(f"train: {len(idx_train)} párrafos · test: {len(idx_test)} párrafos "
+      f"({len(set(grupos[idx_test]))} artículos que el modelo nunca ha visto)")
+
+modelo = clone(busqueda.best_estimator_)
+# La SVM no da probabilidades: si gana, se calibra para poder usar predict_proba
+if not hasattr(modelo.named_steps["clf"], "predict_proba"):
+    modelo.steps[-1] = ("clf", CalibratedClassifierCV(modelo.named_steps["clf"], cv=3))
+t0 = time.time()
+modelo.fit(X_train, y_train)
+print(f"Entrenado en {time.time() - t0:.2f} s")
+
+y_pred = modelo.predict(X_test)
+print(f"\\nAccuracy : {accuracy_score(y_test, y_pred):.3f}")
+print(f"F1 macro : {f1_score(y_test, y_pred, average='macro'):.3f}\\n")
+print(classification_report(y_test, y_pred, digits=3))
+""")
+code("""
+clases = list(TOPICS)
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+ConfusionMatrixDisplay(confusion_matrix(y_test, y_pred, labels=clases), display_labels=clases).plot(
+    ax=axes[0], cmap="Blues", colorbar=False)
+axes[0].set_title("Matriz de confusión (valores absolutos)")
+ConfusionMatrixDisplay(confusion_matrix(y_test, y_pred, labels=clases, normalize="true"),
+                       display_labels=clases).plot(ax=axes[1], cmap="Blues", colorbar=False, values_format=".2f")
+axes[1].set_title("Normalizada por clase real (recall)")
+plt.tight_layout(); plt.show()
+""")
+md("""
+### 3.4 Interpretación: palabras más discriminantes
+
+Los pesos del modelo lineal muestran qué lemas empujan hacia cada clase. Es una
+comprobación de que el modelo ha aprendido vocabulario temático y no artefactos.
+""")
+code("""
+modelo_interpretable = clone(busqueda.best_estimator_).fit(X_train, y_train)
+top = top_features(modelo_interpretable, n=15)
+display(pd.DataFrame(top)[clases])
+""")
+
+md("""
+### 3.5 Medición del ruido de etiquetado con el clasificador
+
+Segunda medida del ruido de la Fase 1: con **predicciones fuera de la partición**
+(*out-of-fold*, cada párrafo lo predice un modelo que no ha visto su artículo),
+se cuentan los párrafos en los que el modelo **contradice la etiqueta con mucha
+seguridad** (probabilidad > 0.8 para otra clase). Son los candidatos a párrafos
+genéricos o mal etiquetados.
+""")
+code("""
+from sklearn.model_selection import cross_val_predict
+
+modelo_oof = clone(modelo)
+proba_oof = cross_val_predict(modelo_oof, X_txt, y, groups=grupos, cv=cv_grupos,
+                              method="predict_proba", n_jobs=-1)
+clases_oof = np.array(sorted(set(y)))
+pred_oof = clases_oof[proba_oof.argmax(1)]
+conf_oof = proba_oof.max(1)
+df["pred_oof"], df["conf_oof"] = pred_oof, conf_oof
+df["ruido_probable"] = (pred_oof != y) & (conf_oof > 0.8)
+
+tabla_ruido = pd.DataFrame({
+    "% contradice etiqueta (>0.8)": df.groupby("class")["ruido_probable"].mean() * 100,
+    "% sin término de dominio": df.groupby("class")["sin_termino_de_dominio"].mean() * 100,
+}).round(1).loc[clases]
+display(tabla_ruido)
+print(f"Estimación global de ruido (clasificador): {df['ruido_probable'].mean()*100:.1f} % de los párrafos")
+print(f"Solo el {df.loc[df['ruido_probable'], 'sin_termino_de_dominio'].mean()*100:.0f} % de esos párrafos "
+      "carece de términos de dominio: las dos medidas detectan cosas distintas (ver abajo).")
+print("\\nEjemplos de párrafos 'ruidosos':")
+for _, r in df[df["ruido_probable"]].sample(6, random_state=SEED).iterrows():
+    print(f" · etiqueta={r['class']:<8} predicción={r['pred_oof']:<8} ({r['conf_oof']:.2f}) [{r['title']}]")
+    print(f"   {r['text'][:170]}")
+""")
+md("""
+La medida heurística (sin términos de dominio) es mucho más alta porque la
+lista de raíces es corta: marca como "genérico" cualquier párrafo que use otro
+vocabulario. El clasificador es más fino. Al revisar sus ejemplos se ven dos
+tipos de "errores":
+
+1. **Ruido real del etiquetado**: párrafos de biografía, política o historia
+   de un club que no hablan del deporte.
+2. **Vocabulario compartido**: párrafos sobre torneos, olimpiadas, ciudades o
+   países que podrían ser de cualquiera de los tres deportes.
+
+¿Eliminar estos párrafos? Se ha decidido **no** hacerlo en el conjunto de test
+(sería evaluar el modelo con datos elegidos por el propio modelo), pero sí se
+comprueba qué pasa si se entrenan sin ellos:
+""")
+code("""
+mascara_train_limpio = ~df["ruido_probable"].values[idx_train]
+modelo_limpio = clone(modelo).fit([X_train[i] for i in np.where(mascara_train_limpio)[0]],
+                                  y_train[mascara_train_limpio])
+print(f"F1 macro en test, entrenando con todo        : {f1_score(y_test, y_pred, average='macro'):.3f}")
+print(f"F1 macro en test, entrenando sin párrafos ruidosos: "
+      f"{f1_score(y_test, modelo_limpio.predict(X_test), average='macro'):.3f}")
+""")
+
+md("""
+### 3.6 ¿El modelo solo mira el nombre del deporte?
+
+Los párrafos del buscador se eligieron precisamente porque contienen la palabra
+del deporte (*tenis-, golf-, rugbe-*). Un modelo podría aprobar solo con eso.
+Para comprobarlo, se **eliminan de los textos todas las palabras que empiezan
+por esas raíces** y se repite la validación cruzada.
+""")
+code("""
+sin_nombre = re.compile(r"\\b(tenis|golf|rugbe)\\S*", re.IGNORECASE)
+X_sin_nombre = [re.sub(r"\\s+", " ", sin_nombre.sub(" ", t)).strip() for t in X_txt]
+f1_sin_nombre = cross_validate(clone(busqueda.best_estimator_), X_sin_nombre, y, groups=grupos,
+                               cv=cv_grupos, scoring="f1_macro", n_jobs=-1)["test_score"].mean()
+print(f"F1 macro CV con todas las palabras           : {busqueda.best_score_:.3f}")
+print(f"F1 macro CV sin las palabras tenis/golf/rugbe: {f1_sin_nombre:.3f}")
+""")
+
+md("""
+### 3.7 Modelo final con todos los datos
+
+Para clasificar páginas web se reentrena el modelo con **todo** el dataset
+(la evaluación ya se ha hecho con la partición de test).
+""")
+code("""
+modelo_final = clone(modelo).fit(X_txt, y)
+
+
+def clasificar_texto(texto):
+    proba = modelo_final.predict_proba([" ".join(doc_to_features(nlp(texto), REP))])[0]
+    return {str(c): round(float(p), 3) for c, p in zip(modelo_final.classes_, proba)}
+
+
+for frase in ["Ŝi venkis en la finalo de Wimbledon post tri setoj kontraŭ la unua en la mondo.",
+              "Li bezonis nur kvar batojn por la dek-oka truo kaj gajnis la Masters-turniron.",
+              "La nacia teamo de Nov-Zelando gajnis la mondan pokalon post fortega skramo."]:
+    print(clasificar_texto(frase), "←", frase)
+""")
+
+# ==========================================================================
+# WEB
+# ==========================================================================
+md("""
+## 4. Clasificación de páginas web
+
+Se eligen páginas **que no están en el dataset** (se comprueba abajo) y se
+obtienen mediante *web scraping* de la **página HTML** con `requests` +
+`BeautifulSoup` (no con el API): se eliminan `script`, `style`, tablas,
+navegación, referencias y cajas de información, y se extraen los párrafos `<p>`,
+que se limpian con la misma función que el dataset.
+
+* **Tenis**: una noticia de **Vikinovaĵoj** (otra web, no Vikipedio) sobre
+  Coco Gauff ganando el US Open.
+* **Golf** y **rugby**: dos artículos de Vikipedio reservados (`HOLDOUT_TITLES`)
+  y excluidos del dataset: *Golfejo* (campo de golf) y *Rugbea Monda Pokalo*
+  (Copa del Mundo de rugby).
+* **Pádel**: el artículo *Padelo (sporto)*. No hay clase de pádel, así que se
+  mira a qué deporte lo acerca el modelo (lo esperable es el tenis).
+
+**Robustez**: si una web falla (sin conexión, error HTTP, cambio de formato),
+se usa una copia de respaldo publicada en el repositorio; si eso también falla,
+esa página se omite con un aviso, pero el cuaderno sigue.
+""")
+code("""
+PAGINAS = {
+    "https://eo.wikinews.org/wiki/Usona_tenisisto_Coco_Gauff_gajnis_la_tenisturniron_US_Open": "teniso",
+    "https://eo.wikipedia.org/wiki/Golfejo": "golfo",
+    "https://eo.wikipedia.org/wiki/Rugbea_Monda_Pokalo": "rugbeo",
+    "https://eo.wikipedia.org/wiki/Padelo_(sporto)": "(pádel: sin clase)",
+}
+titulos_dataset = set(df["title"])
+for url in PAGINAS:
+    titulo = requests.utils.unquote(url.rsplit("/", 1)[1]).replace("_", " ")
+    print(f"{titulo:<12} ¿está en el dataset? {'SÍ ⚠️' if titulo in titulos_dataset else 'no ✅'}")
+
+respaldo = None
+
+
+def obtener_parrafos(url):
+    global respaldo
+    html = fetch_html(url)
+    if html:
+        parrafos = html_to_paragraphs(html)
+        if parrafos:
+            return parrafos, "web en vivo"
+    if respaldo is None:  # se descarga una sola vez
+        try:
+            respaldo = requests.get(URL_WEB_SNAPSHOT, timeout=20).json()
+        except Exception as exc:
+            print(f"  [aviso] tampoco hay copia de respaldo: {type(exc).__name__}")
+            respaldo = {}
+    return respaldo.get(url, []), "copia de respaldo"
+""")
+code("""
+resultados = []
+detalle = {}
+for url, esperado in PAGINAS.items():
+    parrafos, origen = obtener_parrafos(url)
+    nombre = url.rsplit("/", 1)[1].replace("_", " ")
+    if not parrafos:
+        print(f"[omitida] {nombre}: no se pudo obtener texto")
+        continue
+    X_web = [" ".join(doc_to_features(d, REP)) for d in nlp.pipe(parrafos)]
+    proba_par = modelo_final.predict_proba(X_web)
+    proba_pag = proba_par.mean(axis=0)   # probabilidad de la página = media de sus párrafos
+    detalle[nombre] = pd.DataFrame(proba_par, columns=modelo_final.classes_).assign(
+        texto=[p[:80] + "…" for p in parrafos])
+    fila = {"página": nombre, "origen": origen, "párrafos": len(parrafos), "esperada": esperado}
+    fila.update({c: p for c, p in zip(modelo_final.classes_, proba_pag)})
+    fila["predicción"] = modelo_final.classes_[proba_pag.argmax()]
+    resultados.append(fila)
+
+tabla_web = pd.DataFrame(resultados).set_index("página")
+display(tabla_web.style.format({c: "{:.1%}" for c in clases})
+        .background_gradient(subset=clases, cmap="Greens", axis=1))
+""")
+code("""
+if len(tabla_web):
+    ax = tabla_web[clases].plot.barh(stacked=True, figsize=(9, 0.6 + 0.6 * len(tabla_web)),
+                                     color=[COLORES[c] for c in clases])
+    ax.invert_yaxis(); ax.set_xlim(0, 1); ax.set_xlabel("probabilidad")
+    ax.set_title("Probabilidad de cada categoría por página web")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.55), ncol=3, frameon=False)
+    plt.show()
+""")
+md("""
+**Probabilidad de la página = media de las probabilidades de sus párrafos.**
+Se probó también a clasificar la página entera como un único documento, pero
+Naive Bayes multiplica la evidencia de miles de palabras y la probabilidad se
+satura a 0 % / 100 %, lo que no informa de la mezcla de temas. La media de
+párrafos sí lo hace (y el modelo se entrenó precisamente con párrafos).
+
+La clasificación **párrafo a párrafo** muestra qué partes de una página tiran
+hacia cada categoría (aquí, la página de pádel):
+""")
+code("""
+for nombre in list(detalle)[-1:]:   # la página de pádel
+    d = detalle[nombre]
+    d["predicción"] = d[clases].idxmax(axis=1)
+    print(f"{nombre}: reparto de párrafos →", d["predicción"].value_counts().to_dict())
+    display(d[["texto"] + clases + ["predicción"]].head(10).style.format({c: "{:.2f}" for c in clases}))
+""")
+
+# ==========================================================================
+# CONCLUSIONES
+# ==========================================================================
+md("""
+## 5. Conclusiones
+
+* **Dataset**: 1 512 párrafos de 730 artículos obtenidos automáticamente de
+  Vikipedio, con un *script* reproducible y tolerante a fallos. La mayor
+  dificultad ha sido la **falta de texto deportivo en Esperanto**: el pádel
+  tuvo que sustituirse por el tenis y el golf se queda en 218 párrafos, por
+  debajo de los 300 recomendados, aun combinando categoría y buscador. El ruido
+  de etiquetado se ha medido de dos formas (≈18 % de párrafos de la categoría
+  sin vocabulario deportivo; ≈3 % que el clasificador contradice con seguridad).
+* **Modelo de NLP**: la regularidad del Esperanto permite un tokenizador,
+  lematizador, etiquetador morfológico y gestor de stop-words basado en reglas,
+  con un API como el de spaCy (`nlp(texto)` → `Doc` → `Token`), que acierta
+  todos los tokens del *gold standard*.
+* **Clasificación**: la representación por **raíces** (que da el modelo de NLP)
+  es la mejor y reduce el vocabulario un 26 % respecto a la palabra sin
+  procesar. El mejor modelo es la SVM lineal: F1 macro ≈0.84 en validación
+  cruzada por artículo y ≈0.87 en el test. La validación aleatoria por
+  párrafos daría ≈0.92, una cifra inflada por la fuga de información entre
+  párrafos del mismo artículo.
+* **Dependencia del nombre del deporte**: si se borran las palabras
+  *tenis-/golf-/rugbe-*, el F1 cae a ≈0.66. El modelo se apoya mucho en ellas,
+  en parte porque los párrafos del buscador se eligieron justo por contenerlas.
+  Con más texto se podría aprender mejor el vocabulario propio de cada deporte
+  (*seto, truo, skramo*...). Se ve también en las frases de ejemplo de 3.7: sin
+  la palabra del deporte, el modelo tiende a decir **tenis**, la clase mayoritaria.
+* **Web**: las tres páginas reales se clasifican bien con mucha seguridad
+  (la noticia de Vikinovaĵoj, *Golfejo* y *Rugbea Monda Pokalo*). La página de
+  **pádel** se asigna al **tenis** (≈100 %), lo cual es lógico: el texto lo
+  describe como "una mezcla de tenis y squash" y habla de raqueta y pelota de tenis.
+
+**Limitaciones y mejoras posibles**:
+
+* Poco texto de golf y rugby, y desbalanceo hacia el tenis. Se podrían añadir
+  otras fuentes en Esperanto (prensa, foros) o artículos traducidos.
+* Ruido conocido: el artículo *Ofsajdo* (fuera de juego), en la categoría de
+  rugby, habla también de fútbol y hockey sobre hielo.
+* El léxico cerrado no es exhaustivo y las reglas de participios generan algún
+  falso positivo (*konstanta*), que se corrige con una lista de excepciones.
+* El *gold standard* de la Fase 2 es pequeño (10 frases); un 100 % en él no
+  significa que el modelo no se equivoque en textos reales.
+""")
+
+nb = nbf.v4.new_notebook()
+nb["cells"] = cells
+nb["metadata"] = {
+    "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+    "language_info": {"name": "python"},
+    "colab": {"provenance": []},
+}
+OUT.parent.mkdir(parents=True, exist_ok=True)
+nbf.write(nb, OUT)
+print(f"Cuaderno generado: {OUT.relative_to(ROOT)} ({len(cells)} celdas)")
